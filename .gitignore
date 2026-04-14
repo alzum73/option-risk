@@ -1,0 +1,45 @@
+# === Python ===
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+.eggs/
+*.log
+
+# === Environments ===
+.venv/
+venv/
+env/
+ENV/
+*.env
+.env.*
+.ipynb_checkpoints/
+
+# === IDEs & OS ===
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# === Data files ===
+*.parquet
+*.feather
+*.csv.gz
+*.zip
+*.hdf5
+*.db
+*.sqlite
+*.csv
+*.pdf
+# === Notebooks ===
+.ipynb_checkpoints/
+
+# === Cache / temp ===
+__pycache__/
+*.tmp
+*.bak
+*.swp
+
+data/stock_api.ipynb
+data/optiondataapi.ipynb
