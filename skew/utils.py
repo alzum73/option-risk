@@ -140,3 +140,45 @@ def rr_bf_from_chain(chain_df):
     rr25 = sigma_25C - sigma_25P
     bf25 = 0.5*(sigma_25C + sigma_25P) - sigma_atm
     return SmilePoints(sigma_25C, sigma_25P, sigma_atm, rr25, bf25)
+
+# --------- Strategy decision framework integration ----------
+def evaluate_strategy_from_chain(
+    chain_df,
+    leg_specs,
+    spot,
+    T,
+    r,
+    q,
+    vol,
+    premium_col="mid",
+):
+    """Convenience wrapper to evaluate a strategy from fetched chain data.
+
+    Parameters
+    ----------
+    chain_df : pd.DataFrame
+        Option chain slice with at least: opt_type, K, and a premium column.
+    leg_specs : list[tuple[str, float, float]]
+        Sequence of (option_type, strike, quantity), e.g.
+        [('C', 105, +1), ('C', 110, -1)] for a call spread.
+    spot, T, r, q, vol : float
+        Market inputs for terminal distribution assumptions.
+    premium_col : str
+        Premium column in `chain_df` (default: "mid").
+
+    Returns
+    -------
+    StrategyEvaluation
+        Probability-weighted payoff and risk/reward asymmetry diagnostics.
+    """
+    from skew.decision_framework import build_legs_from_chain, evaluate_risk_reward_asymmetry
+
+    legs = build_legs_from_chain(chain_df=chain_df, leg_specs=leg_specs, premium_col=premium_col)
+    return evaluate_risk_reward_asymmetry(
+        spot=spot,
+        time_to_expiry=T,
+        risk_free_rate=r,
+        dividend_yield=q,
+        volatility=vol,
+        legs=legs,
+    )
