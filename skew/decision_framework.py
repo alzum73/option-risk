@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from typing import Iterable, Sequence
 
 import numpy as np
+import matplotlib.pyplot as plt
 from scipy.stats import norm, lognorm
 
 
@@ -50,6 +51,8 @@ class StrategyEvaluation:
     upside_downside_ratio: float
     worst_case_payoff: float
     best_case_payoff: float
+    net_premium: float
+    breakeven_points: tuple[float, ...]
 
 
 def probability_itm(
@@ -124,6 +127,35 @@ def strategy_payoff_at_expiry(terminal_spot: np.ndarray, legs: Sequence[OptionLe
     return payoff
 
 
+def strategy_net_premium(legs: Sequence[OptionLeg]) -> float:
+    """Net premium at inception (negative = debit paid, positive = credit received)."""
+
+    return float(-sum(leg.premium * leg.quantity * leg.contract_size for leg in legs))
+
+
+def estimate_breakevens(
+    terminal_spot: np.ndarray,
+    payoff: np.ndarray,
+) -> tuple[float, ...]:
+    """Estimate breakeven terminal spots where strategy payoff crosses zero."""
+
+    st = np.asarray(terminal_spot, dtype=float)
+    pnl = np.asarray(payoff, dtype=float)
+    sign = np.sign(pnl)
+    changes = np.where(np.diff(sign) != 0)[0]
+
+    points: list[float] = []
+    for idx in changes:
+        x0, x1 = st[idx], st[idx + 1]
+        y0, y1 = pnl[idx], pnl[idx + 1]
+        if np.isclose(y1, y0):
+            points.append(float(x0))
+            continue
+        root = x0 - y0 * (x1 - x0) / (y1 - y0)
+        points.append(float(root))
+    return tuple(points)
+
+
 def probability_weighted_payoff(
     spot: float,
     time_to_expiry: float,
@@ -191,6 +223,8 @@ def evaluate_risk_reward_asymmetry(
     expected_downside = float(-np.trapz(payoff[neg] * pdf[neg], st[neg])) if np.any(neg) else 0.0
 
     ratio = np.inf if expected_downside == 0 else expected_upside / expected_downside
+    net_premium = strategy_net_premium(legs)
+    breakevens = estimate_breakevens(st, payoff)
 
     return StrategyEvaluation(
         expected_payoff=expected,
@@ -200,7 +234,113 @@ def evaluate_risk_reward_asymmetry(
         upside_downside_ratio=ratio,
         worst_case_payoff=float(np.min(payoff)),
         best_case_payoff=float(np.max(payoff)),
+        net_premium=net_premium,
+        breakeven_points=breakevens,
     )
+
+
+def build_straddle(
+    strike: float,
+    call_premium: float,
+    put_premium: float,
+    quantity: float = 1.0,
+    contract_size: int = 100,
+) -> list[OptionLeg]:
+    """Build a long/short straddle from explicit premiums."""
+
+    q = float(quantity)
+    return [
+        OptionLeg("C", strike=float(strike), premium=float(call_premium), quantity=q, contract_size=contract_size),
+        OptionLeg("P", strike=float(strike), premium=float(put_premium), quantity=q, contract_size=contract_size),
+    ]
+
+
+def build_strangle(
+    put_strike: float,
+    call_strike: float,
+    call_premium: float,
+    put_premium: float,
+    quantity: float = 1.0,
+    contract_size: int = 100,
+) -> list[OptionLeg]:
+    """Build a long/short strangle from explicit premiums."""
+
+    q = float(quantity)
+    return [
+        OptionLeg("P", strike=float(put_strike), premium=float(put_premium), quantity=q, contract_size=contract_size),
+        OptionLeg("C", strike=float(call_strike), premium=float(call_premium), quantity=q, contract_size=contract_size),
+    ]
+
+
+def plot_strategy_distribution(
+    spot: float,
+    time_to_expiry: float,
+    risk_free_rate: float,
+    dividend_yield: float,
+    volatility: float,
+    legs: Sequence[OptionLeg],
+    grid_size: int = 3000,
+    tail_probability: float = 0.001,
+    title: str | None = None,
+):
+    """Visualize terminal spot distribution + strategy expiry P&L.
+
+    Returns
+    -------
+    fig, axes, diagnostics
+        diagnostics is a StrategyEvaluation object including probability of profit
+        and risk premium (net premium debit/credit).
+    """
+
+    st = _terminal_spot_grid(
+        spot=spot,
+        time_to_expiry=time_to_expiry,
+        risk_free_rate=risk_free_rate,
+        dividend_yield=dividend_yield,
+        volatility=volatility,
+        grid_size=grid_size,
+        tail_probability=tail_probability,
+    )
+    payoff = strategy_payoff_at_expiry(st, legs)
+
+    sigma_t = volatility * np.sqrt(time_to_expiry)
+    mu = np.log(spot) + (risk_free_rate - dividend_yield - 0.5 * volatility**2) * time_to_expiry
+    pdf = lognorm.pdf(st, s=sigma_t, scale=np.exp(mu))
+    diagnostics = evaluate_risk_reward_asymmetry(
+        spot=spot,
+        time_to_expiry=time_to_expiry,
+        risk_free_rate=risk_free_rate,
+        dividend_yield=dividend_yield,
+        volatility=volatility,
+        legs=legs,
+        grid_size=grid_size,
+        tail_probability=tail_probability,
+    )
+
+    fig, axes = plt.subplots(2, 1, figsize=(10, 8), sharex=True, constrained_layout=True)
+
+    axes[0].plot(st, pdf, color="tab:blue", lw=2, label="Terminal density")
+    axes[0].axvline(spot, color="tab:gray", ls="--", lw=1.5, label="Spot today")
+    axes[0].set_ylabel("Density")
+    axes[0].legend(loc="upper right")
+
+    axes[1].plot(st, payoff, color="tab:orange", lw=2, label="Expiry P&L")
+    axes[1].axhline(0.0, color="black", lw=1)
+    axes[1].axvline(spot, color="tab:gray", ls="--", lw=1.5)
+    for breakeven in diagnostics.breakeven_points:
+        axes[1].axvline(breakeven, color="tab:green", ls=":", lw=1.2)
+    axes[1].set_xlabel("Terminal spot at expiry")
+    axes[1].set_ylabel("Payoff ($)")
+    axes[1].legend(loc="upper right")
+
+    plot_title = title or "Strategy terminal distribution and payoff"
+    subtitle = (
+        f"POP={diagnostics.probability_of_profit:.1%} | "
+        f"E[payoff]={diagnostics.expected_payoff:,.2f} | "
+        f"Risk premium (net)={diagnostics.net_premium:,.2f}"
+    )
+    fig.suptitle(f"{plot_title}\n{subtitle}", fontsize=12)
+    return fig, axes, diagnostics
 
 
 def build_legs_from_chain(
