@@ -53,6 +53,7 @@ class StrategyEvaluation:
     best_case_payoff: float
     net_premium: float
     breakeven_points: tuple[float, ...]
+    leg_itm_probabilities: tuple[float, ...]  # P(ITM) per leg, same order as input legs
 
 
 def probability_itm(
@@ -226,6 +227,19 @@ def evaluate_risk_reward_asymmetry(
     net_premium = strategy_net_premium(legs)
     breakevens = estimate_breakevens(st, payoff)
 
+    leg_itm_probs = tuple(
+        probability_itm(
+            spot=spot,
+            strike=leg.strike,
+            time_to_expiry=time_to_expiry,
+            risk_free_rate=risk_free_rate,
+            dividend_yield=dividend_yield,
+            volatility=volatility,
+            option_type=leg.option_type,
+        )
+        for leg in legs
+    )
+
     return StrategyEvaluation(
         expected_payoff=expected,
         probability_of_profit=probability_profit,
@@ -236,6 +250,7 @@ def evaluate_risk_reward_asymmetry(
         best_case_payoff=float(np.max(payoff)),
         net_premium=net_premium,
         breakeven_points=breakevens,
+        leg_itm_probabilities=leg_itm_probs,
     )
 
 
@@ -386,3 +401,224 @@ def build_legs_from_chain(
         )
 
     return legs
+
+
+# ---------------------------------------------------------------------------
+# Additional strategy builders
+# ---------------------------------------------------------------------------
+
+def build_vertical_spread(
+    option_type: str,
+    long_strike: float,
+    short_strike: float,
+    long_premium: float,
+    short_premium: float,
+    quantity: float = 1.0,
+    contract_size: int = 100,
+) -> list[OptionLeg]:
+    """Build a vertical debit spread.
+
+    For calls (option_type='C') this is a bull call spread: long lower-strike
+    call, short higher-strike call.  For puts (option_type='P') this is a bear
+    put spread: long higher-strike put, short lower-strike put.
+
+    Parameters
+    ----------
+    option_type : 'C' or 'P'
+    long_strike, short_strike : strikes for the long and short legs.
+    long_premium, short_premium : per-share premiums for each leg.
+    quantity : number of spreads (positive = long spread).
+    """
+    q = float(quantity)
+    return [
+        OptionLeg(option_type.upper(), strike=float(long_strike), premium=float(long_premium), quantity=q, contract_size=contract_size),
+        OptionLeg(option_type.upper(), strike=float(short_strike), premium=float(short_premium), quantity=-q, contract_size=contract_size),
+    ]
+
+
+def build_iron_condor(
+    put_buy_strike: float,
+    put_sell_strike: float,
+    call_sell_strike: float,
+    call_buy_strike: float,
+    put_buy_premium: float,
+    put_sell_premium: float,
+    call_sell_premium: float,
+    call_buy_premium: float,
+    quantity: float = 1.0,
+    contract_size: int = 100,
+) -> list[OptionLeg]:
+    """Build a short iron condor (sell put spread + sell call spread).
+
+    Strike ordering expected: put_buy < put_sell < call_sell < call_buy.
+    The net credit is (put_sell_premium - put_buy_premium) +
+                      (call_sell_premium - call_buy_premium).
+    """
+    q = float(quantity)
+    return [
+        OptionLeg("P", strike=float(put_buy_strike),  premium=float(put_buy_premium),  quantity=-q, contract_size=contract_size),
+        OptionLeg("P", strike=float(put_sell_strike), premium=float(put_sell_premium), quantity=q,  contract_size=contract_size),
+        OptionLeg("C", strike=float(call_sell_strike),premium=float(call_sell_premium),quantity=q,  contract_size=contract_size),
+        OptionLeg("C", strike=float(call_buy_strike), premium=float(call_buy_premium), quantity=-q, contract_size=contract_size),
+    ]
+
+
+def build_butterfly(
+    option_type: str,
+    low_strike: float,
+    mid_strike: float,
+    high_strike: float,
+    low_premium: float,
+    mid_premium: float,
+    high_premium: float,
+    quantity: float = 1.0,
+    contract_size: int = 100,
+) -> list[OptionLeg]:
+    """Build a long butterfly spread.
+
+    Buys one low-strike and one high-strike option, sells two mid-strike
+    options.  Maximum profit is achieved when the underlying expires at
+    mid_strike.  Wings should be equidistant: high - mid == mid - low.
+
+    Parameters
+    ----------
+    option_type : 'C' or 'P' — both wings use the same option type.
+    low_strike, mid_strike, high_strike : strikes for the three legs.
+    low_premium, mid_premium, high_premium : per-share premiums.
+    quantity : number of butterflies (positive = long butterfly).
+    """
+    q = float(quantity)
+    return [
+        OptionLeg(option_type.upper(), strike=float(low_strike),  premium=float(low_premium),  quantity=q,    contract_size=contract_size),
+        OptionLeg(option_type.upper(), strike=float(mid_strike),  premium=float(mid_premium),  quantity=-2*q, contract_size=contract_size),
+        OptionLeg(option_type.upper(), strike=float(high_strike), premium=float(high_premium), quantity=q,    contract_size=contract_size),
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Strategy comparison
+# ---------------------------------------------------------------------------
+
+def compare_strategies(
+    spot: float,
+    time_to_expiry: float,
+    risk_free_rate: float,
+    dividend_yield: float,
+    volatility: float,
+    strategies: dict[str, list[OptionLeg]],
+    grid_size: int = 2000,
+    tail_probability: float = 0.001,
+):
+    """Evaluate and rank multiple option strategies side by side.
+
+    Parameters
+    ----------
+    spot, time_to_expiry, risk_free_rate, dividend_yield, volatility : float
+        Shared market inputs used for the terminal distribution.
+    strategies : dict[str, list[OptionLeg]]
+        Mapping of strategy name → list of OptionLeg objects.
+    grid_size : int
+        Number of integration points for numerical integration.
+    tail_probability : float
+        Quantile cut-off for the terminal spot grid at each tail.
+
+    Returns
+    -------
+    pd.DataFrame
+        One row per strategy sorted by expected_payoff (descending).
+        Columns: expected_payoff, probability_of_profit, expected_upside,
+        expected_downside, upside_downside_ratio, worst_case_payoff,
+        best_case_payoff, net_premium.
+    """
+    import pandas as pd
+
+    records = []
+    for name, legs in strategies.items():
+        ev = evaluate_risk_reward_asymmetry(
+            spot=spot,
+            time_to_expiry=time_to_expiry,
+            risk_free_rate=risk_free_rate,
+            dividend_yield=dividend_yield,
+            volatility=volatility,
+            legs=legs,
+            grid_size=grid_size,
+            tail_probability=tail_probability,
+        )
+        records.append({
+            "strategy": name,
+            "net_premium": ev.net_premium,
+            "expected_payoff": ev.expected_payoff,
+            "probability_of_profit": ev.probability_of_profit,
+            "expected_upside": ev.expected_upside,
+            "expected_downside": ev.expected_downside,
+            "upside_downside_ratio": ev.upside_downside_ratio,
+            "worst_case_payoff": ev.worst_case_payoff,
+            "best_case_payoff": ev.best_case_payoff,
+            "breakeven_points": ev.breakeven_points,
+        })
+
+    df = pd.DataFrame(records).set_index("strategy")
+    return df.sort_values("expected_payoff", ascending=False)
+
+
+# ---------------------------------------------------------------------------
+# Multi-strategy visualisation
+# ---------------------------------------------------------------------------
+
+def plot_strategy_comparison(
+    spot: float,
+    time_to_expiry: float,
+    risk_free_rate: float,
+    dividend_yield: float,
+    volatility: float,
+    strategies: dict[str, list[OptionLeg]],
+    grid_size: int = 3000,
+    tail_probability: float = 0.001,
+    title: str | None = None,
+):
+    """Plot expiry P&L curves for multiple strategies on shared axes.
+
+    The top panel shows the risk-neutral terminal spot density; the bottom
+    panel overlays each strategy's payoff at expiry.
+
+    Returns
+    -------
+    fig, axes
+    """
+    st = _terminal_spot_grid(
+        spot=spot,
+        time_to_expiry=time_to_expiry,
+        risk_free_rate=risk_free_rate,
+        dividend_yield=dividend_yield,
+        volatility=volatility,
+        grid_size=grid_size,
+        tail_probability=tail_probability,
+    )
+
+    sigma_t = volatility * np.sqrt(time_to_expiry)
+    mu = np.log(spot) + (risk_free_rate - dividend_yield - 0.5 * volatility**2) * time_to_expiry
+    pdf = lognorm.pdf(st, s=sigma_t, scale=np.exp(mu))
+
+    fig, axes = plt.subplots(2, 1, figsize=(12, 9), sharex=True, constrained_layout=True)
+
+    # --- terminal density ---
+    axes[0].fill_between(st, pdf, alpha=0.25, color="tab:blue")
+    axes[0].plot(st, pdf, color="tab:blue", lw=1.5)
+    axes[0].axvline(spot, color="tab:gray", ls="--", lw=1.5, label=f"Spot {spot:,.0f}")
+    axes[0].set_ylabel("Risk-neutral density")
+    axes[0].legend(loc="upper right", fontsize=9)
+
+    # --- payoff curves ---
+    colors = plt.cm.tab10.colors
+    for i, (name, legs) in enumerate(strategies.items()):
+        payoff = strategy_payoff_at_expiry(st, legs)
+        axes[1].plot(st, payoff, lw=2, color=colors[i % len(colors)], label=name)
+
+    axes[1].axhline(0.0, color="black", lw=1)
+    axes[1].axvline(spot, color="tab:gray", ls="--", lw=1.5)
+    axes[1].set_xlabel("Terminal spot at expiry")
+    axes[1].set_ylabel("Payoff per contract ($)")
+    axes[1].legend(loc="upper right", fontsize=9)
+
+    fig.suptitle(title or "Strategy comparison — expiry payoffs", fontsize=13)
+    return fig, axes
