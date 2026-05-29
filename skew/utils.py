@@ -199,6 +199,7 @@ def compute_option_metrics(df, default_rf: float = 0.04, contract_size: int = 10
 
     # Derived market inputs
     S   = out["spot"].values if "spot" in out.columns else out["underlying_price"].values
+    out["spot"] = S   # always present regardless of source column name
     K   = out["strike"].values
     T   = out["T"].values
     r   = out.get("r", pd.Series([default_rf] * len(out))).values if "r" in out.columns else np.full(len(out), default_rf)
