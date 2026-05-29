@@ -27,6 +27,11 @@ Visualisation
 
 Greeks / smile utilities
     iv_from_price, rr_bf_from_chain, evaluate_strategy_from_chain
+    bs_greeks_full, compute_option_metrics, portfolio_greeks
+    market_implied_pdf, prob_profit_from_pdf
+
+Data store
+    save_option_snapshot, load_option_snapshots, list_snapshots
 
 Yield curves
     FlatYieldCurve, PiecewiseLinearZeroCurve, RiskFreeCurveFactory
@@ -53,6 +58,17 @@ from skew.utils import (
     iv_from_price,
     rr_bf_from_chain,
     evaluate_strategy_from_chain,
+    bs_greeks_full,
+    compute_option_metrics,
+    portfolio_greeks,
+    market_implied_pdf,
+    prob_profit_from_pdf,
+)
+
+from skew.data_store import (
+    save_option_snapshot,
+    load_option_snapshots,
+    list_snapshots,
 )
 
 from skew.zero_curve import (
@@ -85,6 +101,15 @@ __all__ = [
     "iv_from_price",
     "rr_bf_from_chain",
     "evaluate_strategy_from_chain",
+    "bs_greeks_full",
+    "compute_option_metrics",
+    "portfolio_greeks",
+    "market_implied_pdf",
+    "prob_profit_from_pdf",
+    # data store
+    "save_option_snapshot",
+    "load_option_snapshots",
+    "list_snapshots",
     # yield curves
     "FlatYieldCurve",
     "PiecewiseLinearZeroCurve",

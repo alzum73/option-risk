@@ -142,6 +142,201 @@ def rr_bf_from_chain(chain_df):
     return SmilePoints(sigma_25C, sigma_25P, sigma_atm, rr25, bf25)
 
 # --------- Strategy decision framework integration ----------
+# --------- Full Black-Scholes Greeks ---------
+def bs_greeks_full(option_type: str, S: float, K: float, T: float, r: float, q: float, sigma: float) -> dict:
+    """Return a dict of greeks and diagnostics for one option.
+
+    option_type : 'C' or 'P'
+    Returns keys: d1, d2, delta, gamma, vega, theta_day, rho, prob_itm
+    """
+    is_call = option_type.upper() == "C"
+    if S <= 0 or K <= 0 or sigma <= 0 or T <= 0:
+        return dict(d1=np.nan, d2=np.nan, delta=np.nan, gamma=np.nan,
+                    vega=np.nan, theta_day=np.nan, rho=np.nan, prob_itm=np.nan)
+    sqrt_T = np.sqrt(T)
+    _d1 = (np.log(S / K) + (r - q + 0.5 * sigma ** 2) * T) / (sigma * sqrt_T)
+    _d2 = _d1 - sigma * sqrt_T
+    Nd1  = norm.cdf(_d1 if is_call else -_d1)
+    Nd2  = norm.cdf(_d2 if is_call else -_d2)
+    nd1  = norm.pdf(_d1)
+    sign = 1.0 if is_call else -1.0
+    delta = sign * np.exp(-q * T) * Nd1
+    gamma = np.exp(-q * T) * nd1 / (S * sigma * sqrt_T)
+    vega  = S * np.exp(-q * T) * nd1 * sqrt_T / 100.0   # per 1 vol-pt
+    theta = (
+        -(S * np.exp(-q * T) * nd1 * sigma) / (2 * sqrt_T)
+        - sign * r * K * np.exp(-r * T) * Nd2
+        + sign * q * S * np.exp(-q * T) * Nd1
+    ) / 365.0
+    rho = sign * K * T * np.exp(-r * T) * Nd2 / 100.0   # per 1 rate pct-pt
+    return dict(d1=_d1, d2=_d2, delta=delta, gamma=gamma,
+                vega=vega, theta_day=theta, rho=rho, prob_itm=Nd2)
+
+
+def compute_option_metrics(df, default_rf: float = 0.04, contract_size: int = 100):
+    """Compute full set of option metrics from a chain DataFrame.
+
+    Expected columns (from yfinance fetch):
+        isCall / option_type, strike, T, lastPrice / option_price,
+        bid, ask, forward, div_yield (optional), disc_factor (optional)
+
+    Returns the same DataFrame with extra computed columns.
+    """
+    out = df.copy()
+
+    # Normalise column names
+    if "isCall" in out.columns and "option_type" not in out.columns:
+        out["option_type"] = out["isCall"].map({True: "C", False: "P"})
+    else:
+        out["option_type"] = out["option_type"].str.upper().str.strip().replace(
+            {"CALL": "C", "PUT": "P"}
+        )
+
+    if "strike" not in out.columns and "K" in out.columns:
+        out = out.rename(columns={"K": "strike"})
+    if "option_price" in out.columns and "lastPrice" not in out.columns:
+        out = out.rename(columns={"option_price": "lastPrice"})
+
+    # Derived market inputs
+    S   = out["spot"].values if "spot" in out.columns else out["underlying_price"].values
+    K   = out["strike"].values
+    T   = out["T"].values
+    r   = out.get("r", pd.Series([default_rf] * len(out))).values if "r" in out.columns else np.full(len(out), default_rf)
+    q   = out["div_yield"].values if "div_yield" in out.columns else np.zeros(len(out))
+    sig = out["implied_vol"].values if "implied_vol" in out.columns else out["iv"].values
+
+    mid_col = "lastPrice" if "lastPrice" in out.columns else "option_price"
+    mid_arr = out[mid_col].values.astype(float)
+    bid_arr = out["bid"].values.astype(float) if "bid" in out.columns else np.full(len(out), np.nan)
+    ask_arr = out["ask"].values.astype(float) if "ask" in out.columns else np.full(len(out), np.nan)
+
+    is_call = out["option_type"].values == "C"
+
+    # Intrinsic & extrinsic
+    F = out["forward"].values if "forward" in out.columns else S * np.exp((r - q) * T)
+    intrinsic      = np.where(is_call, np.maximum(S - K, 0), np.maximum(K - S, 0))
+    out["intrinsic"]   = intrinsic
+    out["extrinsic"]   = np.maximum(mid_arr - intrinsic, 0)
+    out["moneyness"]   = S / K
+    out["break_even"]  = np.where(is_call, K + mid_arr, K - mid_arr)
+    out["max_loss"]    = mid_arr * contract_size
+    out["premium_pct"] = mid_arr / S * 100.0
+
+    # Greeks
+    greeks_rows = [
+        bs_greeks_full(opt, s, k, t, ri, qi, v)
+        for opt, s, k, t, ri, qi, v in zip(
+            out["option_type"].values, S, K, T, r, q, sig
+        )
+    ]
+    for col in ("d1", "d2", "delta", "gamma", "vega", "theta_day", "rho", "prob_itm"):
+        out[col] = [row[col] for row in greeks_rows]
+
+    # P(profit) using mid breakeven
+    sqrt_T   = np.sqrt(np.maximum(T, 1e-12))
+    sig_safe = np.where(sig > 0, sig, 1e-8)
+    be_mid   = np.where(is_call, K + mid_arr, K - mid_arr)
+    be_mid   = np.where(be_mid > 0, be_mid, 1e-8)
+    be_d2_mid = (np.log(S / be_mid) + (r - q - 0.5 * sig_safe ** 2) * T) / (sig_safe * sqrt_T)
+    out["prob_profit"] = np.where(is_call, norm.cdf(be_d2_mid), norm.cdf(-be_d2_mid))
+
+    # P(profit) using ask (realistic for option buyers — bid-offer spread cost)
+    ask_entry = np.where(np.isfinite(ask_arr) & (ask_arr > 0), ask_arr, mid_arr)
+    be_ask    = np.where(is_call, K + ask_entry, K - ask_entry)
+    be_ask    = np.where(be_ask > 0, be_ask, 1e-8)
+    be_d2_ask = (np.log(S / be_ask) + (r - q - 0.5 * sig_safe ** 2) * T) / (sig_safe * sqrt_T)
+    out["prob_profit_ask"] = np.where(is_call, norm.cdf(be_d2_ask), norm.cdf(-be_d2_ask))
+
+    # Position Greeks (per 1 contract, contract_size shares)
+    for g in ("delta", "gamma", "vega", "theta_day", "rho"):
+        out[f"pos_{g}"] = out[g] * contract_size
+
+    return out
+
+
+def portfolio_greeks(metrics_df) -> dict:
+    """Aggregate position Greeks across all legs in a metrics DataFrame."""
+    cols = ["pos_delta", "pos_gamma", "pos_vega", "pos_theta_day", "pos_rho"]
+    totals = {c: metrics_df[c].sum() if c in metrics_df.columns else np.nan for c in cols}
+    return {k.replace("pos_", ""): v for k, v in totals.items()}
+
+
+def market_implied_pdf(chain_df, spot: float, r: float, T: float,
+                       price_col: str = "option_price", n_grid: int = 500):
+    """Breeden-Litzenberger market-implied risk-neutral PDF.
+
+    Uses OTM puts (K ≤ spot) and OTM calls (K ≥ spot).
+    Since ∂²C/∂K² = ∂²P/∂K², we can stitch together the OTM side of each.
+
+    Returns
+    -------
+    K_fine  : np.ndarray of strikes
+    pdf     : np.ndarray, normalised risk-neutral density
+    """
+    from scipy.interpolate import CubicSpline
+
+    df = chain_df.copy()
+    # normalise option_type to 'C'/'P'
+    if "isCall" in df.columns and "option_type" not in df.columns:
+        df["option_type"] = df["isCall"].map({True: "C", False: "P"})
+    col = df["option_type"].str.upper().str.strip().replace({"CALL": "C", "PUT": "P"})
+    df["option_type"] = col
+
+    if price_col not in df.columns and "lastPrice" in df.columns:
+        df[price_col] = df["lastPrice"]
+
+    df = df.dropna(subset=["strike", price_col])
+    df = df[df[price_col] > 0]
+
+    strike_col = "strike" if "strike" in df.columns else "K"
+
+    otm_puts  = df[(df["option_type"] == "P") & (df[strike_col] <= spot)].copy()
+    otm_calls = df[(df["option_type"] == "C") & (df[strike_col] >= spot)].copy()
+
+    if len(otm_puts) < 3 or len(otm_calls) < 3:
+        raise ValueError("Insufficient OTM options to fit market-implied PDF.")
+
+    puts_sorted  = otm_puts.sort_values(strike_col)
+    calls_sorted = otm_calls.sort_values(strike_col)
+
+    K_obs = np.concatenate([puts_sorted[strike_col].values, calls_sorted[strike_col].values])
+    P_obs = np.concatenate([puts_sorted[price_col].values, calls_sorted[price_col].values])
+
+    # deduplicate
+    _, idx = np.unique(K_obs, return_index=True)
+    K_obs, P_obs = K_obs[idx], P_obs[idx]
+
+    cs = CubicSpline(K_obs, P_obs)
+    K_fine = np.linspace(K_obs.min(), K_obs.max(), n_grid)
+    d2_dK2 = cs(K_fine, 2)
+    pdf = np.exp(r * T) * np.maximum(d2_dK2, 0.0)
+    norm_factor = np.trapz(pdf, K_fine)
+    if norm_factor <= 0:
+        raise ValueError("PDF integrates to zero — check option price data.")
+    return K_fine, pdf / norm_factor
+
+
+def prob_profit_from_pdf(pdf_strikes, pdf_values, breakeven: float, option_type: str) -> float:
+    """Integrate the market-implied PDF to get P(profit) for one option.
+
+    Parameters
+    ----------
+    pdf_strikes : array of strike values from market_implied_pdf
+    pdf_values  : array of density values from market_implied_pdf
+    breakeven   : strike at which the option starts to be profitable
+    option_type : 'C' or 'P'
+    """
+    K = np.asarray(pdf_strikes)
+    q = np.asarray(pdf_values)
+    if option_type.upper() == "C":
+        mask = K >= breakeven
+    else:
+        mask = K <= breakeven
+    if mask.sum() < 2:
+        return 0.0
+    return float(np.trapz(q[mask], K[mask]))
+
+
 def evaluate_strategy_from_chain(
     chain_df,
     leg_specs,
