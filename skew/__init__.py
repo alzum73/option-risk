@@ -50,9 +50,6 @@ from skew.decision_framework import (
 )
 
 from skew.utils import (
-    bs_greeks_full,
-    compute_option_metrics,
-    portfolio_greeks,
     iv_from_price,
     rr_bf_from_chain,
     evaluate_strategy_from_chain,
@@ -85,9 +82,6 @@ __all__ = [
     "plot_strategy_distribution",
     "plot_strategy_comparison",
     # utilities
-    "bs_greeks_full",
-    "compute_option_metrics",
-    "portfolio_greeks",
     "iv_from_price",
     "rr_bf_from_chain",
     "evaluate_strategy_from_chain",
