@@ -63,6 +63,8 @@ from skew.utils import (
     portfolio_greeks,
     market_implied_pdf,
     prob_profit_from_pdf,
+    fit_svi_slice,
+    eval_svi_iv,
 )
 
 from skew.data_store import (
@@ -106,6 +108,8 @@ __all__ = [
     "portfolio_greeks",
     "market_implied_pdf",
     "prob_profit_from_pdf",
+    "fit_svi_slice",
+    "eval_svi_iv",
     # data store
     "save_option_snapshot",
     "load_option_snapshots",

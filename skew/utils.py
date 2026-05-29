@@ -338,6 +338,78 @@ def prob_profit_from_pdf(pdf_strikes, pdf_values, breakeven: float, option_type:
     return float(np.trapz(q[mask], K[mask]))
 
 
+def fit_svi_slice(strikes, ivs, forward, T):
+    """
+    Fit a raw-SVI smile to one expiry slice.
+
+    Use OTM options only (calls above forward, puts below) for best results.
+    Guarantees a convex total-variance smile by construction.
+
+    Parameters
+    ----------
+    strikes : array-like  liquid strikes
+    ivs     : array-like  market implied vols (same units as Black-Scholes σ)
+    forward : float       forward price for this expiry
+    T       : float       years to expiry
+
+    Returns
+    -------
+    params : ndarray (5,) = [a, b, rho, m, sigma]  or None on failure
+    """
+    from scipy.optimize import least_squares
+
+    k = np.log(np.asarray(strikes, float) / forward)
+    w = np.asarray(ivs, float) ** 2 * T          # total variance
+
+    mask = np.isfinite(k) & np.isfinite(w) & (w > 0)
+    k, w = k[mask], w[mask]
+    if len(k) < 5:
+        return None
+
+    def _svi(k_, a, b, rho, m, sig):
+        return a + b * (rho * (k_ - m) + np.sqrt((k_ - m) ** 2 + sig ** 2))
+
+    # ATM total variance as starting level
+    sort_idx = np.argsort(k)
+    w_atm = float(np.interp(0.0, k[sort_idx], w[sort_idx]))
+    x0 = [max(w_atm * 0.5, 1e-4), 0.1, -0.2, 0.0, 0.15]
+    lo = [-np.inf, 1e-6, -0.9999, -2.0, 1e-4]
+    hi = [np.inf,  5.0,  0.9999,  2.0, 5.0]
+
+    try:
+        res = least_squares(
+            lambda p: _svi(k, *p) - w, x0,
+            bounds=(lo, hi), method="trf", max_nfev=2000,
+        )
+        # Accept fit if cost is reasonable (normalised per point)
+        if res.cost / max(len(k), 1) < 0.5:
+            return res.x
+    except Exception:
+        pass
+    return None
+
+
+def eval_svi_iv(params, strikes, forward, T):
+    """
+    Evaluate SVI implied vol at arbitrary strikes, interpolating AND extrapolating.
+
+    Parameters
+    ----------
+    params  : array-like (5,)  output of fit_svi_slice
+    strikes : array-like
+    forward : float
+    T       : float years to expiry
+
+    Returns
+    -------
+    ivs : ndarray (same length as strikes)
+    """
+    a, b, rho, m, sig = params
+    k = np.log(np.asarray(strikes, float) / forward)
+    w = a + b * (rho * (k - m) + np.sqrt((k - m) ** 2 + sig ** 2))
+    return np.sqrt(np.maximum(w, 1e-8) / T)
+
+
 def evaluate_strategy_from_chain(
     chain_df,
     leg_specs,
