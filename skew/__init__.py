@@ -72,6 +72,8 @@ from skew.data_store import (
     save_option_snapshot,
     load_option_snapshots,
     list_snapshots,
+    save_skew_metrics,
+    load_skew_metrics,
 )
 
 from skew.zero_curve import (
@@ -116,6 +118,8 @@ __all__ = [
     "save_option_snapshot",
     "load_option_snapshots",
     "list_snapshots",
+    "save_skew_metrics",
+    "load_skew_metrics",
     # yield curves
     "FlatYieldCurve",
     "PiecewiseLinearZeroCurve",
