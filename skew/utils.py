@@ -213,14 +213,29 @@ def compute_option_metrics(df, default_rf: float = 0.04, contract_size: int = 10
 
     is_call = out["option_type"].values == "C"
 
+    # contracts column: positive = long, negative = short
+    contracts_arr = (
+        out["contracts"].values.astype(float)
+        if "contracts" in out.columns
+        else np.ones(len(out))
+    )
+    is_short = contracts_arr < 0
+
     # Intrinsic & extrinsic
     F = out["forward"].values if "forward" in out.columns else S * np.exp((r - q) * T)
     intrinsic      = np.where(is_call, np.maximum(S - K, 0), np.maximum(K - S, 0))
     out["intrinsic"]   = intrinsic
     out["extrinsic"]   = np.maximum(mid_arr - intrinsic, 0)
     out["moneyness"]   = S / K
+    # break-even is symmetric: for longs it's the min move needed to profit;
+    # for shorts it's the max move the seller can absorb before losing money
     out["break_even"]  = np.where(is_call, K + mid_arr, K - mid_arr)
-    out["max_loss"]    = mid_arr * contract_size
+    # max_loss: long → premium paid; short call → unlimited; short put → strike - premium
+    out["max_loss"] = np.where(
+        is_short,
+        np.where(is_call, np.inf, np.maximum(K - mid_arr, 0) * contract_size),
+        mid_arr * contract_size,
+    )
     out["premium_pct"] = mid_arr / S * 100.0
 
     # Greeks
@@ -234,23 +249,34 @@ def compute_option_metrics(df, default_rf: float = 0.04, contract_size: int = 10
         out[col] = [row[col] for row in greeks_rows]
 
     # P(profit) using mid breakeven
+    # Long:  need underlying to move past break-even → same direction as ITM
+    # Short: profit when underlying stays within collected premium → complementary probability
     sqrt_T   = np.sqrt(np.maximum(T, 1e-12))
     sig_safe = np.where(sig > 0, sig, 1e-8)
     be_mid   = np.where(is_call, K + mid_arr, K - mid_arr)
     be_mid   = np.where(be_mid > 0, be_mid, 1e-8)
     be_d2_mid = (np.log(S / be_mid) + (r - q - 0.5 * sig_safe ** 2) * T) / (sig_safe * sqrt_T)
-    out["prob_profit"] = np.where(is_call, norm.cdf(be_d2_mid), norm.cdf(-be_d2_mid))
+    long_pp  = np.where(is_call, norm.cdf(be_d2_mid),  norm.cdf(-be_d2_mid))
+    short_pp = np.where(is_call, norm.cdf(-be_d2_mid), norm.cdf(be_d2_mid))
+    out["prob_profit"] = np.where(is_short, short_pp, long_pp)
 
-    # P(profit) using ask (realistic for option buyers — bid-offer spread cost)
+    # P(profit) using ask / bid (conservative fill cost)
+    # Longs pay ask; shorts receive bid (worst-case fill is bid for the seller)
+    bid_entry = np.where(np.isfinite(bid_arr) & (bid_arr > 0), bid_arr, mid_arr)
     ask_entry = np.where(np.isfinite(ask_arr) & (ask_arr > 0), ask_arr, mid_arr)
-    be_ask    = np.where(is_call, K + ask_entry, K - ask_entry)
-    be_ask    = np.where(be_ask > 0, be_ask, 1e-8)
+    be_ask = np.where(is_call, K + ask_entry, K - ask_entry)
+    be_ask = np.where(be_ask > 0, be_ask, 1e-8)
     be_d2_ask = (np.log(S / be_ask) + (r - q - 0.5 * sig_safe ** 2) * T) / (sig_safe * sqrt_T)
-    out["prob_profit_ask"] = np.where(is_call, norm.cdf(be_d2_ask), norm.cdf(-be_d2_ask))
+    be_bid = np.where(is_call, K + bid_entry, K - bid_entry)
+    be_bid = np.where(be_bid > 0, be_bid, 1e-8)
+    be_d2_bid = (np.log(S / be_bid) + (r - q - 0.5 * sig_safe ** 2) * T) / (sig_safe * sqrt_T)
+    long_pp_ask  = np.where(is_call, norm.cdf(be_d2_ask),  norm.cdf(-be_d2_ask))
+    short_pp_bid = np.where(is_call, norm.cdf(-be_d2_bid), norm.cdf(be_d2_bid))
+    out["prob_profit_ask"] = np.where(is_short, short_pp_bid, long_pp_ask)
 
-    # Position Greeks (per 1 contract, contract_size shares)
+    # Position Greeks: signed by contracts (negative contracts = short = negative exposure)
     for g in ("delta", "gamma", "vega", "theta_day", "rho"):
-        out[f"pos_{g}"] = out[g] * contract_size
+        out[f"pos_{g}"] = out[g] * contract_size * contracts_arr
 
     return out
 
