@@ -288,6 +288,120 @@ def portfolio_greeks(metrics_df) -> dict:
     return {k.replace("pos_", ""): v for k, v in totals.items()}
 
 
+def smile_prob_profit(
+    chain_slice: pd.DataFrame,
+    forward: float,
+    T: float,
+    disc_factor: float,
+    break_even: float,
+    is_call: bool,
+    is_short: bool = False,
+    n_grid: int = 400,
+) -> float:
+    """Probability of profit using the Breeden-Litzenberger risk-neutral PDF.
+
+    Fits the OTM vol smile at the option's own expiry (no cross-maturity
+    interpolation), builds a smooth call-price surface, then integrates
+    the implied PDF over the profitable strike region.
+
+    Returns NaN when fewer than 3 OTM quotes are available so the caller
+    can fall back to the Black-Scholes approximation.
+
+    Parameters
+    ----------
+    chain_slice : option chain rows for a **single** expiry; must have
+                  columns ``option_type`` (C/P), ``strike``, ``implied_vol``
+    forward     : forward price of the underlying at this expiry
+    T           : time to expiry in years
+    disc_factor : discount factor e^{-rT}
+    break_even  : underlying price at which P&L = 0 at expiry
+    is_call     : True for call, False for put
+    is_short    : True if the position is short (contracts < 0)
+    n_grid      : number of strike grid points for the PDF
+    """
+    from scipy.ndimage import gaussian_filter1d
+    from scipy.interpolate import PchipInterpolator
+
+    # ── 1. Normalise chain slice ───────────────────────────────────────────────
+    sl = chain_slice.copy()
+    if "implied_vol" not in sl.columns and "iv" in sl.columns:
+        sl = sl.rename(columns={"iv": "implied_vol"})
+    if "option_type" not in sl.columns or "implied_vol" not in sl.columns:
+        return np.nan
+
+    sl["option_type"] = (sl["option_type"].astype(str).str.upper().str.strip()
+                         .replace({"CALL": "C", "PUT": "P"}))
+    calls = sl[(sl["option_type"] == "C") & (sl["strike"] >= forward)]
+    puts  = sl[(sl["option_type"] == "P") & (sl["strike"] <  forward)]
+    otm   = (pd.concat([puts, calls])
+               .dropna(subset=["implied_vol", "strike"])
+               .pipe(lambda d: d[d["implied_vol"].between(0.01, 5.0)])
+               .sort_values("strike"))
+
+    if len(otm) < 3:
+        return np.nan
+
+    # ── 2. Strike grid (data range + flat-wing buffer) ────────────────────────
+    k_data = np.log(otm["strike"].values / forward)
+    wing   = 0.10
+    k_lo, k_hi = k_data.min() - wing, k_data.max() + wing
+    k_grid     = np.linspace(k_lo, k_hi, n_grid)
+    K_grid     = forward * np.exp(k_grid)
+
+    # ── 3. IV on grid: SVI fit, then PCHIP fallback ───────────────────────────
+    iv_grid = None
+    if len(otm) >= 5:
+        params = fit_svi_slice(otm["strike"].values, otm["implied_vol"].values, forward, T)
+        if params is not None:
+            iv_svi = eval_svi_iv(params, K_grid, forward, T)
+            iv_lo  = float(eval_svi_iv(params, [forward * np.exp(k_lo)], forward, T)[0])
+            iv_hi  = float(eval_svi_iv(params, [forward * np.exp(k_hi)], forward, T)[0])
+            # flat wings outside the data range
+            iv_grid = np.where(k_grid < k_data.min(), iv_lo,
+                      np.where(k_grid > k_data.max(), iv_hi, iv_svi))
+
+    if iv_grid is None:
+        pchip   = PchipInterpolator(otm["strike"].values, otm["implied_vol"].values,
+                                    extrapolate=False)
+        iv_grid = pchip(K_grid).astype(float)
+        valid   = np.where(np.isfinite(iv_grid))[0]
+        if len(valid) == 0:
+            return np.nan
+        iv_grid[:valid[0]]     = iv_grid[valid[0]]
+        iv_grid[valid[-1]+1:]  = iv_grid[valid[-1]]
+
+    iv_grid = gaussian_filter1d(np.clip(iv_grid, 1e-4, 5.0), sigma=2)
+
+    # ── 4. Call-price surface ─────────────────────────────────────────────────
+    C = np.array([bs_price_forward(True, forward, K, iv, T, disc_factor)
+                  for K, iv in zip(K_grid, iv_grid)])
+    C = gaussian_filter1d(C, sigma=2)
+
+    # ── 5. Breeden-Litzenberger: f(K) = (1/D) × ∂²C/∂K² ─────────────────────
+    h     = K_grid[1] - K_grid[0]
+    Cpp           = np.empty_like(C)
+    Cpp[1:-1]     = (C[2:] - 2*C[1:-1] + C[:-2]) / (h * h)
+    Cpp[0]        = Cpp[1]
+    Cpp[-1]       = Cpp[-2]
+    pdf   = np.clip(Cpp / max(disc_factor, 1e-16), 0.0, None)
+    area  = np.trapz(pdf, K_grid)
+    if area < 1e-12:
+        return np.nan
+    pdf /= area  # normalise: ∫pdf dK = 1
+
+    # ── 6. Integrate over profitable region ───────────────────────────────────
+    # Long call / short put → profit if S_T > break_even
+    # Long put / short call → profit if S_T < break_even
+    profit_above = (is_call != is_short)  # XOR
+    mask = K_grid >= break_even if profit_above else K_grid <= break_even
+
+    if not np.any(mask):
+        return 0.0
+    if np.all(mask):
+        return 1.0
+    return float(np.trapz(pdf[mask], K_grid[mask]))
+
+
 def market_implied_pdf(chain_df, spot: float, r: float, T: float,
                        price_col: str = "option_price", n_grid: int = 500):
     """Breeden-Litzenberger market-implied risk-neutral PDF.

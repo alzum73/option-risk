@@ -28,6 +28,7 @@ Visualisation
 Greeks / smile utilities
     iv_from_price, rr_bf_from_chain, evaluate_strategy_from_chain
     bs_greeks_full, compute_option_metrics, portfolio_greeks
+    smile_prob_profit
     market_implied_pdf, prob_profit_from_pdf
 
 Data store
@@ -62,6 +63,7 @@ from skew.utils import (
     bs_greeks_full,
     compute_option_metrics,
     portfolio_greeks,
+    smile_prob_profit,
     market_implied_pdf,
     prob_profit_from_pdf,
     fit_svi_slice,
@@ -109,6 +111,7 @@ __all__ = [
     "bs_greeks_full",
     "compute_option_metrics",
     "portfolio_greeks",
+    "smile_prob_profit",
     "bs_price_forward",
     "market_implied_pdf",
     "prob_profit_from_pdf",
