@@ -63,6 +63,7 @@ def save_option_snapshot(
     ticker: str,
     db_path: str = _DEFAULT_DB,
     source: str  = "yfinance",
+    snapshot_date: str | None = None,
 ) -> int:
     """Append an option chain snapshot to the SQLite store.
 
@@ -72,10 +73,11 @@ def save_option_snapshot(
 
     Parameters
     ----------
-    df         : raw option chain DataFrame (yfinance or IBKR format)
-    ticker     : underlying ticker symbol (e.g. 'NVDA')
-    db_path    : path to the SQLite file; created automatically if absent
-    source     : data source label stored in the DB ('yfinance' or 'ibkr')
+    df            : raw option chain DataFrame (yfinance or IBKR format)
+    ticker        : underlying ticker symbol (e.g. 'NVDA')
+    db_path       : path to the SQLite file; created automatically if absent
+    source        : data source label stored in the DB ('yfinance' or 'ibkr')
+    snapshot_date : override date string (YYYY-MM-DD); defaults to today
 
     Returns
     -------
@@ -85,7 +87,7 @@ def save_option_snapshot(
     out = _normalise(df.copy())
     out["ticker"]        = ticker.upper()
     out["source"]        = source
-    out["snapshot_date"] = date.today().isoformat()
+    out["snapshot_date"] = snapshot_date or date.today().isoformat()
 
     conn = sqlite3.connect(db_path)
     try:
