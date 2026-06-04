@@ -63,6 +63,7 @@ def save_option_snapshot(
     ticker: str,
     db_path: str = _DEFAULT_DB,
     source: str  = "yfinance",
+    snapshot_date: str | None = None,
 ) -> int:
     """Append an option chain snapshot to the SQLite store.
 
@@ -72,10 +73,11 @@ def save_option_snapshot(
 
     Parameters
     ----------
-    df         : raw option chain DataFrame (yfinance or IBKR format)
-    ticker     : underlying ticker symbol (e.g. 'NVDA')
-    db_path    : path to the SQLite file; created automatically if absent
-    source     : data source label stored in the DB ('yfinance' or 'ibkr')
+    df            : raw option chain DataFrame (yfinance or IBKR format)
+    ticker        : underlying ticker symbol (e.g. 'NVDA')
+    db_path       : path to the SQLite file; created automatically if absent
+    source        : data source label stored in the DB ('yfinance' or 'ibkr')
+    snapshot_date : override date string (YYYY-MM-DD); defaults to today
 
     Returns
     -------
@@ -85,7 +87,7 @@ def save_option_snapshot(
     out = _normalise(df.copy())
     out["ticker"]        = ticker.upper()
     out["source"]        = source
-    out["snapshot_date"] = date.today().isoformat()
+    out["snapshot_date"] = snapshot_date or date.today().isoformat()
 
     conn = sqlite3.connect(db_path)
     try:
@@ -156,6 +158,107 @@ def load_option_snapshots(
     conn  = sqlite3.connect(db_path)
     try:
         df = pd.read_sql(f"SELECT * FROM {_TABLE} WHERE {where}", conn)
+    except Exception:
+        df = pd.DataFrame()
+    finally:
+        conn.close()
+    return df
+
+
+_SKEW_TABLE = "skew_metrics"
+
+
+def save_skew_metrics(
+    df: pd.DataFrame,
+    ticker: str,
+    db_path: str = _DEFAULT_DB,
+) -> int:
+    """Persist the per-expiry skew table (sigma_atm, RR25, BF25 …) for today.
+
+    Rows are deduplicated on (ticker, calc_date, expiry) so re-running the
+    notebook on the same day is safe — existing rows are silently skipped.
+
+    Parameters
+    ----------
+    df      : DataFrame containing at least expiry + any skew columns
+    ticker  : underlying symbol
+    db_path : path to the SQLite file (same DB as option snapshots)
+
+    Returns
+    -------
+    int : number of new rows actually inserted
+    """
+    Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+    out = df.copy()
+    out["ticker"]    = ticker.upper()
+    out["calc_date"] = date.today().isoformat()
+
+    if "expiry" in out.columns:
+        out["expiry"] = pd.to_datetime(out["expiry"]).dt.date.astype(str)
+
+    conn = sqlite3.connect(db_path)
+    try:
+        out.to_sql("_tmp_skew", conn, if_exists="replace", index=False)
+
+        conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS {_SKEW_TABLE} AS
+            SELECT * FROM _tmp_skew WHERE 1=0
+        """)
+        try:
+            conn.execute(f"""
+                CREATE UNIQUE INDEX IF NOT EXISTS uq_skew
+                ON {_SKEW_TABLE}(ticker, calc_date, expiry)
+            """)
+        except sqlite3.OperationalError:
+            pass
+
+        cols     = ", ".join(f'"{c}"' for c in out.columns)
+        n_before = conn.execute(f"SELECT COUNT(*) FROM {_SKEW_TABLE}").fetchone()[0]
+        conn.execute(f"""
+            INSERT OR IGNORE INTO {_SKEW_TABLE} ({cols})
+            SELECT {cols} FROM _tmp_skew
+        """)
+        n_after = conn.execute(f"SELECT COUNT(*) FROM {_SKEW_TABLE}").fetchone()[0]
+        conn.execute("DROP TABLE IF EXISTS _tmp_skew")
+        conn.commit()
+        return n_after - n_before
+    finally:
+        conn.close()
+
+
+def load_skew_metrics(
+    ticker: str,
+    db_path: str = _DEFAULT_DB,
+    start_date: str | None = None,
+    end_date:   str | None = None,
+) -> pd.DataFrame:
+    """Load historical skew metrics for a ticker.
+
+    Parameters
+    ----------
+    ticker     : underlying symbol (case-insensitive)
+    db_path    : path to the SQLite file
+    start_date : earliest calc_date to include (YYYY-MM-DD)
+    end_date   : latest  calc_date to include (YYYY-MM-DD)
+
+    Returns
+    -------
+    pd.DataFrame  (empty if no data found)
+    """
+    if not Path(db_path).exists():
+        return pd.DataFrame()
+
+    clauses = [f"ticker = '{ticker.upper()}'"]
+    if start_date:
+        clauses.append(f"calc_date >= '{start_date}'")
+    if end_date:
+        clauses.append(f"calc_date <= '{end_date}'")
+
+    conn = sqlite3.connect(db_path)
+    try:
+        df = pd.read_sql(
+            f"SELECT * FROM {_SKEW_TABLE} WHERE {' AND '.join(clauses)}", conn
+        )
     except Exception:
         df = pd.DataFrame()
     finally:
