@@ -137,7 +137,7 @@ def rr_bf_from_chain(chain_df):
     sigma_25C = interpolate_sigma_at_strike(df, K_25C)
     sigma_25P = interpolate_sigma_at_strike(df, K_25P)
 
-    rr25 = sigma_25C - sigma_25P
+    rr25 = sigma_25P - sigma_25C   # equity convention: positive = put skew (fear)
     bf25 = 0.5*(sigma_25C + sigma_25P) - sigma_atm
     return SmilePoints(sigma_25C, sigma_25P, sigma_atm, rr25, bf25)
 
