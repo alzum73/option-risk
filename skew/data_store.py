@@ -172,17 +172,22 @@ def save_skew_metrics(
     df: pd.DataFrame,
     ticker: str,
     db_path: str = _DEFAULT_DB,
+    calc_date: str | None = None,
 ) -> int:
-    """Persist the per-expiry skew table (sigma_atm, RR25, BF25 …) for today.
+    """Persist the per-expiry skew table (sigma_atm, RR25, BF25 …).
 
     Rows are deduplicated on (ticker, calc_date, expiry) so re-running the
-    notebook on the same day is safe — existing rows are silently skipped.
+    notebook for the same snapshot date is safe — existing rows are silently
+    skipped.
 
     Parameters
     ----------
-    df      : DataFrame containing at least expiry + any skew columns
-    ticker  : underlying symbol
-    db_path : path to the SQLite file (same DB as option snapshots)
+    df        : DataFrame containing at least expiry + any skew columns
+    ticker    : underlying symbol
+    db_path   : path to the SQLite file (same DB as option snapshots)
+    calc_date : date string (YYYY-MM-DD) for this set of metrics; defaults to
+                today.  Pass the snapshot_date so historical metrics are stored
+                under the date the data was captured, not the date of analysis.
 
     Returns
     -------
@@ -191,7 +196,7 @@ def save_skew_metrics(
     Path(db_path).parent.mkdir(parents=True, exist_ok=True)
     out = df.copy()
     out["ticker"]    = ticker.upper()
-    out["calc_date"] = date.today().isoformat()
+    out["calc_date"] = calc_date or date.today().isoformat()
 
     if "expiry" in out.columns:
         out["expiry"] = pd.to_datetime(out["expiry"]).dt.date.astype(str)
