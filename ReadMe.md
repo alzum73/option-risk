@@ -14,28 +14,32 @@ data/options.db
 └── skew_metrics       ← per-expiry σATM / RR25 / BF25 computed by the analysis
 ```
 
-Every row in `option_snapshots` is tagged with a `source` column so the two
-fetchers coexist without clashing:
+**IBKR is the single option-chain source.** The fetch notebook enriches every
+snapshot before saving, so the DB holds everything the analyses need:
 
-| `source` | Written by | Notes |
-|---|---|---|
-| `ibkr` | `notebooks/fetch_ibkr_data.ipynb` | Live chain via IB Gateway (`ib_insync`), model greeks + IV |
-| `ibkr_hist` | `notebooks/fetch_ibkr_data.ipynb` § 4 | Historical IV backfill |
-| `yfinance` | `notebooks/fetch_opt_data.ipynb` | Yahoo Finance chain, enriched with SOFR discount factors and forwards |
+| Field | Where it comes from |
+|---|---|
+| bid / ask / mid, IV, greeks, open interest, spot | IBKR (IB Gateway via `ib_insync`) |
+| `disc_factor` | USD SOFR zero curve (`skew/zero_curve.py`, fetched from the Fed) |
+| `div_yield` | Yahoo Finance — the only chain field still looked up there (one number per ticker) |
+| `forward`, `T` | computed: F = S·e^(−q·T)/D(T) |
+
+Rows are tagged with a `source` column: `ibkr` (live snapshot) or `ibkr_hist`
+(historical backfill). Legacy `yfinance` rows may still exist in old databases —
+all notebooks now ignore them.
 
 ## Notebooks — what reads and writes what
 
 | Notebook | Role | Reads | Writes |
 |---|---|---|---|
-| `fetch_ibkr_data.ipynb` | **Fetch** (IBKR) | IB Gateway (port 4002) | `option_snapshots` (`ibkr`, `ibkr_hist`) |
-| `fetch_opt_data.ipynb` | **Fetch** (Yahoo) | Yahoo Finance API | `option_snapshots` (`yfinance`) |
-| `ibkr_skew_analysis.ipynb` | Analysis | `option_snapshots` — **IBKR sources only** | `skew_metrics` |
-| `option_metrics_calculator.ipynb` | Analysis | `option_snapshots` (latest snapshot, any source) + `data/option_data.csv` (portfolio) | — |
+| `fetch_ibkr_data.ipynb` | **Fetch** | IB Gateway (port 4002) + SOFR curve + Yahoo div yield | `option_snapshots` (`ibkr`, `ibkr_hist`) |
+| `ibkr_skew_analysis.ipynb` | Analysis | `option_snapshots` (IBKR sources) | `skew_metrics` |
+| `option_metrics_calculator.ipynb` | Analysis | `option_snapshots` (IBKR sources, latest snapshot) + `data/option_data.csv` (portfolio) + Yahoo price history (HV vs IV table) | — |
 
 Typical daily workflow:
 
-1. Run `fetch_ibkr_data.ipynb` during market hours → today's chain appended
-   to the DB (IBKR returns no option data outside trading hours)
+1. Run `fetch_ibkr_data.ipynb` during market hours → today's enriched chain
+   appended to the DB (IBKR returns no option data outside trading hours)
 2. Run `ibkr_skew_analysis.ipynb` → skew metrics saved per snapshot date, surface + PDF plots
 3. Run `option_metrics_calculator.ipynb` → greeks and diagnostics for your CSV portfolio
 
@@ -45,11 +49,10 @@ Typical daily workflow:
 option-risk/
 ├── ReadMe.md
 ├── data/
-│   ├── options.db                       # shared SQLite DB — created by the fetch notebooks
+│   ├── options.db                       # shared SQLite DB — created by the fetch notebook
 │   └── option_data.csv                  # your portfolio positions (symbol, option_type, strike, expiry[, contracts])
 ├── notebooks/
-│   ├── fetch_ibkr_data.ipynb            # FETCH    — IBKR live chain + historical IV backfill
-│   ├── fetch_opt_data.ipynb             # FETCH    — Yahoo Finance chains
+│   ├── fetch_ibkr_data.ipynb            # FETCH    — IBKR chain + SOFR/div-yield enrichment + IV backfill
 │   ├── ibkr_skew_analysis.ipynb         # ANALYSIS — skew metrics, SVI surface, BL PDF, skew history
 │   └── option_metrics_calculator.ipynb  # ANALYSIS — portfolio greeks & diagnostics
 └── skew/
@@ -59,8 +62,10 @@ option-risk/
     └── decision_framework.py            # option strategy evaluation (see below)
 ```
 
-> `pdf_calc.ipynb` was removed — its vol-surface / PDF / skew analysis is fully
-> covered by `ibkr_skew_analysis.ipynb`, which is the single skew pipeline.
+> Removed notebooks: `pdf_calc.ipynb` (surface/PDF/skew fully covered by
+> `ibkr_skew_analysis.ipynb`) and `fetch_opt_data.ipynb` (Yahoo chain fetcher —
+> IBKR is the single chain source; Yahoo is used only for the dividend yield
+> during the IBKR fetch and for underlying price history in the HV table).
 
 ## Option Strategy Decision Framework
 
