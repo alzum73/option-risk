@@ -30,12 +30,12 @@ fetchers coexist without clashing:
 | `fetch_ibkr_data.ipynb` | **Fetch** (IBKR) | IB Gateway (port 4002) | `option_snapshots` (`ibkr`, `ibkr_hist`) |
 | `fetch_opt_data.ipynb` | **Fetch** (Yahoo) | Yahoo Finance API | `option_snapshots` (`yfinance`) |
 | `ibkr_skew_analysis.ipynb` | Analysis | `option_snapshots` — **IBKR sources only** | `skew_metrics` |
-| `pdf_calc.ipynb` | Analysis | `option_snapshots` — needs yfinance-schema columns (`isCall`, `disc_factor`, `div_yield`) | — |
 | `option_metrics_calculator.ipynb` | Analysis | `option_snapshots` (latest snapshot, any source) + `data/option_data.csv` (portfolio) | — |
 
 Typical daily workflow:
 
-1. Run one (or both) fetch notebooks → today's chains appended to the DB
+1. Run `fetch_ibkr_data.ipynb` during market hours → today's chain appended
+   to the DB (IBKR returns no option data outside trading hours)
 2. Run `ibkr_skew_analysis.ipynb` → skew metrics saved per snapshot date, surface + PDF plots
 3. Run `option_metrics_calculator.ipynb` → greeks and diagnostics for your CSV portfolio
 

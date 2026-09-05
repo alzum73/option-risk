@@ -99,6 +99,13 @@ def save_option_snapshot(
             SELECT * FROM _tmp WHERE 1=0
         """)
 
+        # Add any columns this source has that the table doesn't yet
+        # (ibkr and yfinance snapshots carry different column sets)
+        existing_cols = {r[1] for r in conn.execute(f"PRAGMA table_info({_TABLE})")}
+        for c in out.columns:
+            if c not in existing_cols:
+                conn.execute(f'ALTER TABLE {_TABLE} ADD COLUMN "{c}"')
+
         # Add unique constraint column set if not already present
         try:
             conn.execute(f"""
