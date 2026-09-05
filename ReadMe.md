@@ -39,15 +39,28 @@ Typical daily workflow:
 2. Run `ibkr_skew_analysis.ipynb` → skew metrics saved per snapshot date, surface + PDF plots
 3. Run `option_metrics_calculator.ipynb` → greeks and diagnostics for your CSV portfolio
 
-## Package layout
+## Project structure
 
 ```
-skew/
-├── data_store.py          # SQLite persistence: save/load snapshots & skew metrics
-├── utils.py               # BS pricing, deltas, SVI fit/eval, IV interpolation
-├── zero_curve.py          # USD zero curve (SOFR) → discount factors, forwards
-└── decision_framework.py  # strategy evaluation (see below)
+option-risk/
+├── ReadMe.md
+├── data/
+│   ├── options.db                       # shared SQLite DB — created by the fetch notebooks
+│   └── option_data.csv                  # your portfolio positions (symbol, option_type, strike, expiry[, contracts])
+├── notebooks/
+│   ├── fetch_ibkr_data.ipynb            # FETCH    — IBKR live chain + historical IV backfill
+│   ├── fetch_opt_data.ipynb             # FETCH    — Yahoo Finance chains
+│   ├── ibkr_skew_analysis.ipynb         # ANALYSIS — skew metrics, SVI surface, BL PDF, skew history
+│   └── option_metrics_calculator.ipynb  # ANALYSIS — portfolio greeks & diagnostics
+└── skew/
+    ├── data_store.py                    # SQLite persistence: save/load snapshots & skew metrics
+    ├── utils.py                         # BS pricing, deltas, SVI fit/eval, IV interpolation
+    ├── zero_curve.py                    # USD zero curve (SOFR) → discount factors, forwards
+    └── decision_framework.py            # option strategy evaluation (see below)
 ```
+
+> `pdf_calc.ipynb` was removed — its vol-surface / PDF / skew analysis is fully
+> covered by `ibkr_skew_analysis.ipynb`, which is the single skew pipeline.
 
 ## Option Strategy Decision Framework
 
