@@ -38,8 +38,12 @@ all notebooks now ignore them.
 
 Typical daily workflow:
 
-1. Run `fetch_ibkr_data.ipynb` during market hours → today's enriched chain
-   appended to the DB (IBKR returns no option data outside trading hours)
+1. Run `fetch_ibkr_data.ipynb` → enriched chain appended to the DB.
+   With `FETCH_MODE = "close"` (default) run it any time outside US market
+   hours: it fetches IBKR's last close-of-business values (frozen data) and saves
+   them under the date of the last completed session — a weekend or Monday-morning
+   run is stored as Friday. Requires a live options data subscription.
+   `FETCH_MODE = "live"` fetches intraday delayed data saved under today's date.
 2. Run `ibkr_skew_analysis.ipynb` → skew metrics saved per snapshot date, surface + PDF plots
 3. Run `option_metrics_calculator.ipynb` → greeks and diagnostics for your CSV portfolio
 
